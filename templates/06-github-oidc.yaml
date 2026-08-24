@@ -1,0 +1,98 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  ECS CI/CD Lab - GitHub Actions OIDC federation. Lets the app repo's
+  workflow assume an AWS role with short-lived, per-run credentials instead
+  of long-lived IAM user access keys.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: ecs-cicd-lab
+  GitHubOrg:
+    Type: String
+    Description: GitHub org or username that owns the application repo
+  GitHubAppRepo:
+    Type: String
+    Description: Name of the application repository (not org/repo, just the repo name)
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: Branch allowed to assume this role
+  CreateOidcProvider:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Set to false if an OIDC provider for token.actions.githubusercontent.com
+      already exists in this account (there can only be one per account).
+
+Conditions:
+  ShouldCreateProvider: !Equals [!Ref CreateOidcProvider, 'true']
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  GitHubActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-github-actions-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - ShouldCreateProvider
+                - !Ref GitHubOidcProvider
+                - !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}/${GitHubAppRepo}:ref:refs/heads/${GitHubBranch}
+      Policies:
+        - PolicyName: push-to-ecr-and-artifact-bucket
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: EcrAuth
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Sid: EcrPush
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                  - ecr:BatchGetImage
+                Resource: !ImportValue
+                  Fn::Sub: ${EnvironmentName}-EcrRepositoryArn
+              - Sid: UploadAppSpecArtifact
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub
+                  - ${BucketArn}/source/*
+                  - BucketArn: !ImportValue
+                      Fn::Sub: ${EnvironmentName}-ArtifactBucketArn
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-github-actions-role
+
+Outputs:
+  GitHubActionsRoleArn:
+    Value: !GetAtt GitHubActionsRole.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-GitHubActionsRoleArn

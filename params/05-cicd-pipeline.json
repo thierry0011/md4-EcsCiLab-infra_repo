@@ -1,0 +1,3 @@
+[
+  { "ParameterKey": "EnvironmentName", "ParameterValue": "ecs-cicd-lab" }
+]

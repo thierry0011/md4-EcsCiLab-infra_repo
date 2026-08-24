@@ -1,0 +1,7 @@
+[
+  { "ParameterKey": "EnvironmentName", "ParameterValue": "ecs-cicd-lab" },
+  { "ParameterKey": "GitHubOrg", "ParameterValue": "REPLACE_ME-github-org-or-username" },
+  { "ParameterKey": "GitHubInfraRepo", "ParameterValue": "REPLACE_ME-infra-repo-name" },
+  { "ParameterKey": "GitHubBranch", "ParameterValue": "main" },
+  { "ParameterKey": "CreateOidcProvider", "ParameterValue": "false" }
+]

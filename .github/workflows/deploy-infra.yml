@@ -1,0 +1,52 @@
+name: Deploy Infra (on-demand cascade resync)
+
+# CloudFormation GitSync already auto-deploys each template on push to its own
+# file - that stays on and is the mechanism the rubric's "provisioned via
+# CloudFormation GitSync" line refers to. This workflow is a separate,
+# supplemental tool: run it by hand whenever you've changed a value one stack
+# Exports and want every downstream stack that imports it re-evaluated, in
+# dependency order, without working out which ones by hand. It is not wired to
+# push events, so it never races GitSync's own trigger on the file that
+# actually changed.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write # required for requesting the OIDC JWT
+  contents: read
+
+concurrency:
+  group: infra-deploy
+  cancel-in-progress: false # two manual runs queue instead of racing each other
+
+jobs:
+  cascade-resync:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ENV_NAME: ${{ vars.ENV_NAME || 'ecs-cicd-lab' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # No IAM access keys anywhere: this exchanges the GitHub-issued OIDC
+      # token for short-lived AWS credentials scoped to the infra-deploy role
+      # (07-infra-deploy-role.yaml) - a separate, much broader-permission role
+      # from the app repo's, since this one manages seven stacks' worth of
+      # resource types rather than just ECR pushes.
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_INFRA_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Run cascade resync
+        run: |
+          chmod +x scripts/deploy-cascade.sh
+          ./scripts/deploy-cascade.sh
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "Cascade resync finished (see job log above for per-stack results)." >> "$GITHUB_STEP_SUMMARY"

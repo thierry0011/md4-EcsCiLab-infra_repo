@@ -1,0 +1,13 @@
+[
+  { "ParameterKey": "EnvironmentName", "ParameterValue": "ecs-cicd-lab" },
+  { "ParameterKey": "ContainerPort", "ParameterValue": "5000" },
+  { "ParameterKey": "TaskCpu", "ParameterValue": "256" },
+  { "ParameterKey": "TaskMemory", "ParameterValue": "512" },
+  { "ParameterKey": "MinTaskCount", "ParameterValue": "1" },
+  { "ParameterKey": "DesiredTaskCount", "ParameterValue": "1" },
+  { "ParameterKey": "MaxTaskCount", "ParameterValue": "4" },
+  { "ParameterKey": "CpuTargetUtilization", "ParameterValue": "50" },
+  { "ParameterKey": "ImageUri", "ParameterValue": "REPLACE_ME-first-deploy-bootstrap-image-uri-only" },
+  { "ParameterKey": "FullName", "ParameterValue": "Thierry Kwizera" },
+  { "ParameterKey": "LabName", "ParameterValue": "ECS CI/CD Lab" }
+]

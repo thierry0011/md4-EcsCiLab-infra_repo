@@ -1,0 +1,140 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  ECS CI/CD Lab - Security groups (least-privilege) and VPC interface/gateway
+  endpoints so ECS Fargate tasks can reach ECR, CloudWatch Logs and S3
+  without traversing the public internet / NAT.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: ecs-cicd-lab
+  ContainerPort:
+    Type: Number
+    Default: 5000
+
+Resources:
+  # ---------------- Security Groups ----------------
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public ALB - allows inbound HTTP from the internet only
+      VpcId: !ImportValue
+        Fn::Sub: ${EnvironmentName}-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Public HTTP
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-alb-sg
+
+  # Egress is left at the default "allow all" so the ALB can reach ECS tasks on
+  # whatever port the target group forwards to; ingress is what matters for
+  # least privilege on a public-facing load balancer.
+
+  EcsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS Fargate tasks - only reachable from the ALB
+      VpcId: !ImportValue
+        Fn::Sub: ${EnvironmentName}-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+          Description: Traffic from ALB only
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-ecs-sg
+
+  VpcEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: VPC interface endpoints - only reachable from ECS tasks
+      VpcId: !ImportValue
+        Fn::Sub: ${EnvironmentName}-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref EcsSecurityGroup
+          Description: HTTPS from ECS tasks only
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-vpce-sg
+
+  # ---------------- VPC Endpoints ----------------
+  # Gateway endpoint (no hourly cost) - ECR stores image layers in S3
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${EnvironmentName}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-PrivateRouteTable1Id
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-PrivateRouteTable2Id
+
+  EcrApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${EnvironmentName}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.api
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-PrivateSubnet2Id
+      SecurityGroupIds:
+        - !Ref VpcEndpointSecurityGroup
+
+  EcrDkrEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${EnvironmentName}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.dkr
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-PrivateSubnet2Id
+      SecurityGroupIds:
+        - !Ref VpcEndpointSecurityGroup
+
+  LogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${EnvironmentName}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.logs
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-PrivateSubnet2Id
+      SecurityGroupIds:
+        - !Ref VpcEndpointSecurityGroup
+
+Outputs:
+  AlbSecurityGroupId:
+    Value: !Ref AlbSecurityGroup
+    Export:
+      Name: !Sub ${EnvironmentName}-AlbSecurityGroupId
+  EcsSecurityGroupId:
+    Value: !Ref EcsSecurityGroup
+    Export:
+      Name: !Sub ${EnvironmentName}-EcsSecurityGroupId

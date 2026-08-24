@@ -1,0 +1,290 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  ECS CI/CD Lab - Public ALB, ECS Fargate cluster/service (private subnets),
+  blue/green target groups for CodeDeploy, and CPU-based auto scaling (1-4 tasks).
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: ecs-cicd-lab
+  ContainerPort:
+    Type: Number
+    Default: 5000
+  TaskCpu:
+    Type: String
+    Default: '256'
+  TaskMemory:
+    Type: String
+    Default: '512'
+  MinTaskCount:
+    Type: Number
+    Default: 1
+  DesiredTaskCount:
+    Type: Number
+    Default: 1
+  MaxTaskCount:
+    Type: Number
+    Default: 4
+  CpuTargetUtilization:
+    Type: Number
+    Default: 50
+  # First deploy needs *some* valid image already in ECR before the ECS
+  # service can reach steady state. Push one manually (or run the GitHub
+  # Actions workflow once via workflow_dispatch) tagged "bootstrap", then
+  # pass that image URI here. Every deploy after that is handled by the
+  # blue/green CodeDeploy pipeline, not by this template.
+  ImageUri:
+    Type: String
+  FullName:
+    Type: String
+    Default: 'Thierry Kwizera'
+  LabName:
+    Type: String
+    Default: 'ECS CI/CD Lab'
+
+Resources:
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub ${EnvironmentName}-cluster
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-cluster
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/${EnvironmentName}
+      RetentionInDays: 30
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-task-exec-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-task-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Description: Application-level task role - no extra permissions needed by this static UI app
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${EnvironmentName}-task
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: app
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              Protocol: tcp
+          Environment:
+            - Name: FULL_NAME
+              Value: !Ref FullName
+            - Name: LAB_NAME
+              Value: !Ref LabName
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: app
+
+  # ---------------- Load Balancer ----------------
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${EnvironmentName}-alb
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-PublicSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-PublicSubnet2Id
+      SecurityGroups:
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-AlbSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-alb
+
+  BlueTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${EnvironmentName}-tg-blue
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !ImportValue
+        Fn::Sub: ${EnvironmentName}-VpcId
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '30'
+
+  GreenTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${EnvironmentName}-tg-green
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !ImportValue
+        Fn::Sub: ${EnvironmentName}-VpcId
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '30'
+
+  ProdListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref BlueTargetGroup
+
+  # Test listener CodeDeploy uses to send validation traffic to the "green"
+  # task set before it is promoted to production on port 80.
+  TestListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 8080
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref GreenTargetGroup
+
+  # ---------------- ECS Service ----------------
+  EcsService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ProdListener
+      - TestListener
+    Properties:
+      ServiceName: !Sub ${EnvironmentName}-service
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredTaskCount
+      LaunchType: FARGATE
+      HealthCheckGracePeriodSeconds: 60
+      DeploymentController:
+        Type: CODE_DEPLOY
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !ImportValue
+              Fn::Sub: ${EnvironmentName}-PrivateSubnet1Id
+            - !ImportValue
+              Fn::Sub: ${EnvironmentName}-PrivateSubnet2Id
+          SecurityGroups:
+            - !ImportValue
+              Fn::Sub: ${EnvironmentName}-EcsSecurityGroupId
+      LoadBalancers:
+        - ContainerName: app
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref BlueTargetGroup
+    # NOTE: once CodeDeploy performs its first blue/green swap, it owns the
+    # live task definition revision and the active target group. Do not
+    # "correct" drift on TaskDefinition/LoadBalancers here via a stack
+    # update - that is expected and is how blue/green deployments work.
+
+  # ---------------- Auto Scaling (1-4 tasks, CPU target tracking) ----------------
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn: EcsService
+    Properties:
+      ServiceNamespace: ecs
+      ResourceId: !Sub service/${EcsCluster}/${EnvironmentName}-service
+      ScalableDimension: ecs:service:DesiredCount
+      MinCapacity: !Ref MinTaskCount
+      MaxCapacity: !Ref MaxTaskCount
+
+  CpuScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub ${EnvironmentName}-cpu-target-tracking
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: !Ref CpuTargetUtilization
+        ScaleInCooldown: 60
+        ScaleOutCooldown: 60
+
+Outputs:
+  ClusterName:
+    Value: !Ref EcsCluster
+    Export:
+      Name: !Sub ${EnvironmentName}-ClusterName
+  ServiceName:
+    Value: !Sub ${EnvironmentName}-service
+    Export:
+      Name: !Sub ${EnvironmentName}-ServiceName
+  AlbDnsName:
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub ${EnvironmentName}-AlbDnsName
+  ProdListenerArn:
+    Value: !Ref ProdListener
+    Export:
+      Name: !Sub ${EnvironmentName}-ProdListenerArn
+  TestListenerArn:
+    Value: !Ref TestListener
+    Export:
+      Name: !Sub ${EnvironmentName}-TestListenerArn
+  BlueTargetGroupName:
+    Value: !GetAtt BlueTargetGroup.TargetGroupName
+    Export:
+      Name: !Sub ${EnvironmentName}-BlueTargetGroupName
+  GreenTargetGroupName:
+    Value: !GetAtt GreenTargetGroup.TargetGroupName
+    Export:
+      Name: !Sub ${EnvironmentName}-GreenTargetGroupName
+  TaskExecutionRoleArn:
+    Value: !GetAtt TaskExecutionRole.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-TaskExecutionRoleArn
+  TaskRoleArn:
+    Value: !GetAtt TaskRole.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-TaskRoleArn

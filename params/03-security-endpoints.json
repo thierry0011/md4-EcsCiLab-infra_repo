@@ -1,0 +1,4 @@
+[
+  { "ParameterKey": "EnvironmentName", "ParameterValue": "ecs-cicd-lab" },
+  { "ParameterKey": "ContainerPort", "ParameterValue": "5000" }
+]

@@ -1,0 +1,57 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  ECS CI/CD Lab - ECR repository with immutable image tags and lifecycle policy.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: ecs-cicd-lab
+  RepositoryName:
+    Type: String
+    Default: ecs-cicd-lab-app
+
+Resources:
+  AppRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref RepositoryName
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 20 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 20
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-ecr
+        - Key: Project
+          Value: !Ref EnvironmentName
+
+Outputs:
+  EcrRepositoryArn:
+    Value: !GetAtt AppRepository.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-EcrRepositoryArn
+  EcrRepositoryName:
+    Value: !Ref AppRepository
+    Export:
+      Name: !Sub ${EnvironmentName}-EcrRepositoryName
+  EcrRepositoryUri:
+    Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${AppRepository}
+    Export:
+      Name: !Sub ${EnvironmentName}-EcrRepositoryUri
