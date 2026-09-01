@@ -56,15 +56,27 @@ stack_name_for() {
   echo "${ENV_NAME}-${tmpl#0*-}"
 }
 
-# 04-ecs-alb's TaskDefinition/ImageUri is a plain CloudFormation-managed
-# property, but after the first CodeDeploy blue/green deployment, CodeDeploy -
-# not this template - owns which task definition revision is actually live
-# (see ARCHITECTURE.md). Redeploying with the static bootstrap ImageUri from
-# params/04-ecs-alb.json would silently revert every deployment CodeDeploy has
-# promoted since. So: always look up the live image first, and only fall back
-# to the static param on a genuinely first-ever deploy (service doesn't exist
-# yet).
-resolve_live_image() {
+# 04-ecs-alb's EcsService.TaskDefinition property can never be changed via
+# CloudFormation once CodeDeploy has performed a deployment - ECS's
+# UpdateService API unconditionally rejects any attempt to change
+# taskDefinition on a service using DeploymentController: CODE_DEPLOY
+# ("Unable to update task definition on services with a CODE_DEPLOY
+# deployment controller. Use AWS CodeDeploy to trigger a new deployment."),
+# *even when the new value's content matches what's already live* -
+# RegisterTaskDefinition always mints a brand-new revision ARN regardless of
+# whether the content is identical to an existing revision, so there is no
+# value you can feed back in that CloudFormation would see as "unchanged."
+# An earlier version of this script tried to read the live image and inject
+# it back into the change set to make the update a no-op; that's the
+# scenario that fails, every time, once a service exists. So: never touch
+# ImageUri for an existing service. Always use the static value from
+# params/04-ecs-alb.json (frozen at whatever the bootstrap value was) - this
+# keeps the TaskDefinition resource byte-identical to the stack's
+# last-applied state, so CloudFormation sees no diff and never attempts to
+# touch EcsService.TaskDefinition at all. This function is diagnostic only:
+# it reports drift between the live image and the frozen params value, it
+# does not act on it.
+report_live_image_drift() {
   local cluster="${ENV_NAME}-cluster"
   local service="${ENV_NAME}-service"
   local task_def_arn image
@@ -76,8 +88,8 @@ resolve_live_image() {
     --output text 2>/dev/null || true)
 
   if [[ -z "${task_def_arn}" || "${task_def_arn}" == "None" ]]; then
-    echo "No live service found (${cluster}/${service}) - assuming first-ever deploy, using static ImageUri from params file." >&2
-    return 1
+    echo "No live service found (${cluster}/${service}) - assuming first-ever deploy." >&2
+    return
   fi
 
   image=$(aws ecs describe-task-definition \
@@ -86,36 +98,22 @@ resolve_live_image() {
     --output text 2>/dev/null || true)
 
   if [[ -z "${image}" || "${image}" == "None" ]]; then
-    echo "Found a task definition (${task_def_arn}) but couldn't read its image - falling back to static ImageUri." >&2
-    return 1
-  fi
-
-  echo "${image}"
-}
-
-# Builds the --parameters JSON for a stack, overriding ImageUri with the live
-# image for 04-ecs-alb specifically. Prints a path to a temp file.
-params_file_for() {
-  local tmpl="$1"
-  local base_params="${INFRA_DIR}/params/${tmpl}.json"
-
-  if [[ "${tmpl}" != "04-ecs-alb" ]]; then
-    echo "${base_params}"
     return
   fi
 
-  local resolved_image
-  if resolved_image=$(resolve_live_image); then
-    local tmp
-    tmp="$(mktemp)"
-    jq --arg img "${resolved_image}" \
-      'map(if .ParameterKey == "ImageUri" then .ParameterValue = $img else . end)' \
-      "${base_params}" > "${tmp}"
-    echo "Using live image for 04-ecs-alb: ${resolved_image}" >&2
-    echo "${tmp}"
-  else
-    echo "${base_params}"
+  echo "Live image is currently ${image} (via CodeDeploy). params/04-ecs-alb.json's ImageUri is intentionally not touched - see ARCHITECTURE.md." >&2
+}
+
+# Builds the --parameters JSON for a stack. Always the static params file -
+# see report_live_image_drift() above for why 04-ecs-alb is never overridden.
+params_file_for() {
+  local tmpl="$1"
+
+  if [[ "${tmpl}" == "04-ecs-alb" ]]; then
+    report_live_image_drift
   fi
+
+  echo "${INFRA_DIR}/params/${tmpl}.json"
 }
 
 deploy_stack() {
@@ -170,16 +168,18 @@ deploy_stack() {
     fi
   fi
 
-  # AWS::ECS::TaskDefinition is excluded here: registering a new revision
-  # always reports as a "replacement" (new physical resource ARN each time),
-  # even for a plain image-tag change - but nothing is actually destroyed,
-  # and this is exactly the case resolve_live_image() exists to make routine
-  # and safe. Every other resource type still gets the strict stop-and-review
-  # treatment below.
+  # No exclusion for AWS::ECS::TaskDefinition here (an earlier version of
+  # this script excluded it, assuming its "replacement" was harmless revision
+  # churn - it isn't: any change to it always fails at the EcsService step,
+  # see report_live_image_drift() above). If this ever fires on 04-ecs-alb,
+  # params/04-ecs-alb.json's ImageUri (or another TaskDefinition property)
+  # was changed and genuinely cannot be applied via a stack update while
+  # CodeDeploy owns the service - revert the params change rather than
+  # proceeding.
   local replacements
   replacements=$(aws cloudformation describe-change-set \
     --stack-name "${stack_name}" --change-set-name "${change_set_name}" \
-    --query "Changes[?ResourceChange.Replacement=='True' && ResourceChange.ResourceType!='AWS::ECS::TaskDefinition'].ResourceChange.LogicalResourceId" \
+    --query "Changes[?ResourceChange.Replacement=='True'].ResourceChange.LogicalResourceId" \
     --output text)
 
   if [[ -n "${replacements}" ]]; then
