@@ -49,6 +49,8 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-cluster
+        - Key: Project
+          Value: !Ref EnvironmentName
 
   LogGroup:
     Type: AWS::Logs::LogGroup
@@ -106,6 +108,8 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-alb
+        - Key: Project
+          Value: !Ref EnvironmentName
 
   BlueTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup

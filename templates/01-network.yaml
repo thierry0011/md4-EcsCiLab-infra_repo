@@ -1,7 +1,9 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  ECS CI/CD Lab - Network stack. Multi-AZ VPC with public subnets (ALB, NAT)
-  and private subnets (ECS Fargate tasks), one NAT Gateway per AZ for HA.
+  ECS CI/CD Lab - Network stack. Multi-AZ VPC with public subnets (ALB)
+  and private subnets (ECS Fargate tasks). No NAT Gateways: ECS tasks reach
+  ECR, CloudWatch Logs and S3 entirely via VPC endpoints (03-security-endpoints.yaml),
+  so private subnets have no default route to the internet.
 
 Parameters:
   EnvironmentName:
@@ -49,7 +51,7 @@ Resources:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
-  # Public subnets: ALB + NAT gateways
+  # Public subnets: ALB
   PublicSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -131,35 +133,8 @@ Resources:
         - Key: Tier
           Value: private
 
-  # One EIP + NAT gateway per AZ, so a single AZ failure doesn't take out the other AZ's egress
-  NatEip1:
-    Type: AWS::EC2::EIP
-    Properties:
-      Domain: vpc
-
-  NatEip2:
-    Type: AWS::EC2::EIP
-    Properties:
-      Domain: vpc
-
-  NatGateway1:
-    Type: AWS::EC2::NatGateway
-    Properties:
-      AllocationId: !GetAtt NatEip1.AllocationId
-      SubnetId: !Ref PublicSubnet1
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-nat-1
-
-  NatGateway2:
-    Type: AWS::EC2::NatGateway
-    Properties:
-      AllocationId: !GetAtt NatEip2.AllocationId
-      SubnetId: !Ref PublicSubnet2
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-nat-2
-
+  # No NAT gateways: private subnets have no default route to the internet.
+  # ECS tasks reach ECR/logs/S3 via the VPC endpoints in 03-security-endpoints.yaml instead.
   PrivateRouteTable1:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -167,13 +142,6 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-private-rt-1
-
-  PrivateRoute1:
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId: !Ref PrivateRouteTable1
-      DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId: !Ref NatGateway1
 
   PrivateSubnet1RouteAssoc:
     Type: AWS::EC2::SubnetRouteTableAssociation
@@ -188,13 +156,6 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-private-rt-2
-
-  PrivateRoute2:
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId: !Ref PrivateRouteTable2
-      DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId: !Ref NatGateway2
 
   PrivateSubnet2RouteAssoc:
     Type: AWS::EC2::SubnetRouteTableAssociation
