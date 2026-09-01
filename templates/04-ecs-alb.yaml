@@ -28,11 +28,7 @@ Parameters:
   CpuTargetUtilization:
     Type: Number
     Default: 50
-  # First deploy needs *some* valid image already in ECR before the ECS
-  # service can reach steady state. Push one manually (or run the GitHub
-  # Actions workflow once via workflow_dispatch) tagged "bootstrap", then
-  # pass that image URI here. Every deploy after that is handled by the
-  # blue/green CodeDeploy pipeline, not by this template.
+  # First deploy needs a real image already in ECR; push one manually (tagged "bootstrap") and pass its URI here
   ImageUri:
     Type: String
   FullName:
@@ -60,33 +56,6 @@ Resources:
       LogGroupName: !Sub /ecs/${EnvironmentName}
       RetentionInDays: 30
 
-  TaskExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub ${EnvironmentName}-task-exec-role
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: ecs-tasks.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
-
-  TaskRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub ${EnvironmentName}-task-role
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: ecs-tasks.amazonaws.com
-            Action: sts:AssumeRole
-      Description: Application-level task role - no extra permissions needed by this static UI app
-
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
@@ -96,8 +65,10 @@ Resources:
       NetworkMode: awsvpc
       RequiresCompatibilities:
         - FARGATE
-      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
-      TaskRoleArn: !GetAtt TaskRole.Arn
+      ExecutionRoleArn: !ImportValue
+        Fn::Sub: ${EnvironmentName}-TaskExecutionRoleArn
+      TaskRoleArn: !ImportValue
+        Fn::Sub: ${EnvironmentName}-TaskRoleArn
       ContainerDefinitions:
         - Name: app
           Image: !Ref ImageUri
@@ -117,7 +88,7 @@ Resources:
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: app
 
-  # ---------------- Load Balancer ----------------
+  # Load balancer
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
@@ -180,8 +151,7 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref BlueTargetGroup
 
-  # Test listener CodeDeploy uses to send validation traffic to the "green"
-  # task set before it is promoted to production on port 80.
+  # Test listener CodeDeploy uses to validate the "green" task set before promoting it to port 80
   TestListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
@@ -192,7 +162,7 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref GreenTargetGroup
 
-  # ---------------- ECS Service ----------------
+  # ECS service
   EcsService:
     Type: AWS::ECS::Service
     DependsOn:
@@ -222,12 +192,9 @@ Resources:
         - ContainerName: app
           ContainerPort: !Ref ContainerPort
           TargetGroupArn: !Ref BlueTargetGroup
-    # NOTE: once CodeDeploy performs its first blue/green swap, it owns the
-    # live task definition revision and the active target group. Do not
-    # "correct" drift on TaskDefinition/LoadBalancers here via a stack
-    # update - that is expected and is how blue/green deployments work.
+    # Once CodeDeploy does its first blue/green swap, it owns the live task def and target group; don't "correct" that drift here
 
-  # ---------------- Auto Scaling (1-4 tasks, CPU target tracking) ----------------
+  # Auto scaling: 1-4 tasks, CPU target tracking
   ScalableTarget:
     Type: AWS::ApplicationAutoScaling::ScalableTarget
     DependsOn: EcsService
@@ -280,11 +247,3 @@ Outputs:
     Value: !GetAtt GreenTargetGroup.TargetGroupName
     Export:
       Name: !Sub ${EnvironmentName}-GreenTargetGroupName
-  TaskExecutionRoleArn:
-    Value: !GetAtt TaskExecutionRole.Arn
-    Export:
-      Name: !Sub ${EnvironmentName}-TaskExecutionRoleArn
-  TaskRoleArn:
-    Value: !GetAtt TaskRole.Arn
-    Export:
-      Name: !Sub ${EnvironmentName}-TaskRoleArn

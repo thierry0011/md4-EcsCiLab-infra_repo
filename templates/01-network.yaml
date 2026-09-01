@@ -49,7 +49,7 @@ Resources:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
-  # ---------- Public subnets (ALB + NAT gateways) ----------
+  # Public subnets: ALB + NAT gateways
   PublicSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -104,7 +104,7 @@ Resources:
       SubnetId: !Ref PublicSubnet2
       RouteTableId: !Ref PublicRouteTable
 
-  # ---------- Private subnets (ECS Fargate tasks) ----------
+  # Private subnets: ECS Fargate tasks
   PrivateSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -131,7 +131,7 @@ Resources:
         - Key: Tier
           Value: private
 
-  # One EIP + NAT Gateway per AZ so a single AZ failure never removes egress for the other AZ
+  # One EIP + NAT gateway per AZ, so a single AZ failure doesn't take out the other AZ's egress
   NatEip1:
     Type: AWS::EC2::EIP
     Properties:

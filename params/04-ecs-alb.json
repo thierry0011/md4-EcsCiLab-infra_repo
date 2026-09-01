@@ -7,7 +7,7 @@
   { "ParameterKey": "DesiredTaskCount", "ParameterValue": "1" },
   { "ParameterKey": "MaxTaskCount", "ParameterValue": "4" },
   { "ParameterKey": "CpuTargetUtilization", "ParameterValue": "50" },
-  { "ParameterKey": "ImageUri", "ParameterValue": "REPLACE_ME-first-deploy-bootstrap-image-uri-only" },
+  { "ParameterKey": "ImageUri", "ParameterValue": "711387109786.dkr.ecr.us-east-1.amazonaws.com/ecs-cicd-lab-app:bootstrap" },
   { "ParameterKey": "FullName", "ParameterValue": "Thierry Kwizera" },
   { "ParameterKey": "LabName", "ParameterValue": "ECS CI/CD Lab" }
 ]

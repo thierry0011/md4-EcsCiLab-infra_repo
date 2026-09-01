@@ -13,7 +13,7 @@ Parameters:
     Default: 5000
 
 Resources:
-  # ---------------- Security Groups ----------------
+  # Security groups
   AlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -30,9 +30,7 @@ Resources:
         - Key: Name
           Value: !Sub ${EnvironmentName}-alb-sg
 
-  # Egress is left at the default "allow all" so the ALB can reach ECS tasks on
-  # whatever port the target group forwards to; ingress is what matters for
-  # least privilege on a public-facing load balancer.
+  # Egress stays default allow-all so the ALB can reach any target group port; ingress is what matters here
 
   EcsSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -66,8 +64,8 @@ Resources:
         - Key: Name
           Value: !Sub ${EnvironmentName}-vpce-sg
 
-  # ---------------- VPC Endpoints ----------------
-  # Gateway endpoint (no hourly cost) - ECR stores image layers in S3
+  # VPC endpoints
+  # Gateway endpoint (no hourly cost); ECR stores image layers in S3
   S3GatewayEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:

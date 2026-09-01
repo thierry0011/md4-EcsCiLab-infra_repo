@@ -18,16 +18,20 @@ INFRA_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ENV_NAME="${ENV_NAME:-ecs-cicd-lab}"
 
 # Fixed, hand-maintained dependency order - not computed from the templates.
-# Adding an 8th stack, or a dependency graph that stops being a straight line,
+# 00-iam-roles goes first: every IAM role every other stack needs (ECS task
+# roles, CodePipeline/CodeDeploy/EventBridge roles, both GitHub OIDC roles)
+# lives there, with policies built from deterministic ARNs (account/region/
+# name convention) instead of Fn::ImportValue - so it has zero dependency on
+# 01-05 and both GitHub Actions roles exist from the very first deploy.
+# Adding a new stack, or a dependency graph that stops being a straight line,
 # means editing this array by hand; nothing here detects that for you.
 STACKS=(
+  00-iam-roles
   01-network
   02-ecr
   03-security-endpoints
   04-ecs-alb
   05-cicd-pipeline
-  06-github-oidc
-  07-infra-deploy-role
 )
 
 # Tracks a change set that's been created but not yet executed, so a trap can
@@ -125,9 +129,19 @@ deploy_stack() {
 
   echo "==> ${stack_name}"
 
+  # create-change-set defaults to type UPDATE, which fails outright against a
+  # stack that doesn't exist yet - so a brand-new stack needs CREATE
+  # explicitly. This is what lets this script double as the first-ever
+  # bootstrap of all stacks, not just a resync of ones already up.
+  local change_set_type="UPDATE"
+  if ! aws cloudformation describe-stacks --stack-name "${stack_name}" >/dev/null 2>&1; then
+    change_set_type="CREATE"
+  fi
+
   aws cloudformation create-change-set \
     --stack-name "${stack_name}" \
     --change-set-name "${change_set_name}" \
+    --change-set-type "${change_set_type}" \
     --template-body "file://${template_file}" \
     --parameters "file://${params_file}" \
     --capabilities CAPABILITY_NAMED_IAM >/dev/null
@@ -174,8 +188,13 @@ deploy_stack() {
   PENDING_STACK=""
   PENDING_CHANGE_SET=""
 
-  aws cloudformation wait stack-update-complete --stack-name "${stack_name}"
-  echo "${stack_name} updated."
+  if [[ "${change_set_type}" == "CREATE" ]]; then
+    aws cloudformation wait stack-create-complete --stack-name "${stack_name}"
+    echo "${stack_name} created."
+  else
+    aws cloudformation wait stack-update-complete --stack-name "${stack_name}"
+    echo "${stack_name} updated."
+  fi
 }
 
 for tmpl in "${STACKS[@]}"; do

@@ -1,0 +1,505 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  ECS CI/CD Lab - IAM foundation. Every role every other stack needs (ECS task
+  roles, CodePipeline/CodeDeploy/EventBridge service roles, both GitHub OIDC
+  roles), created up front so nothing downstream has to wait on a resource
+  stack just to get a role ARN. Policies below build ARNs deterministically
+  (account/region/name convention) instead of Fn::ImportValue, specifically so
+  this template has zero dependency on 01-05 - deploy it first, and the
+  GitHub Actions roles exist before there is anything else in the account.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: ecs-cicd-lab
+  RepositoryName:
+    Type: String
+    Default: ecs-cicd-lab-app
+    Description: Must match 02-ecr.yaml's RepositoryName parameter.
+  GitHubOrg:
+    Type: String
+    Description: GitHub org or username that owns both repos
+  GitHubAppRepo:
+    Type: String
+    Description: Name of the application repository (not org/repo, just the repo name)
+  GitHubInfraRepo:
+    Type: String
+    Description: Name of the infrastructure repository (not org/repo, just the repo name)
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: Branch allowed to assume either GitHub Actions role
+  CreateOidcProvider:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Set to false if an OIDC provider for token.actions.githubusercontent.com
+      already exists in this account (there can only be one per account).
+      Both GitHub roles below share the single provider this template creates.
+
+Conditions:
+  ShouldCreateProvider: !Equals [!Ref CreateOidcProvider, 'true']
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  # ECS task roles used by 04-ecs-alb's TaskDefinition
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-task-exec-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-task-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Description: Application-level task role - no extra permissions needed by this static UI app
+
+  # CodePipeline service role used by 05-cicd-pipeline
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-codepipeline-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: pipeline-permissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ArtifactBucketAccess
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                  - s3:GetBucketVersioning
+                Resource:
+                  - !Sub arn:aws:s3:::${EnvironmentName}-artifacts-${AWS::AccountId}-${AWS::Region}
+                  - !Sub arn:aws:s3:::${EnvironmentName}-artifacts-${AWS::AccountId}-${AWS::Region}/*
+              - Sid: CodeDeployAccess
+                Effect: Allow
+                Action:
+                  - codedeploy:CreateDeployment
+                  - codedeploy:GetDeployment
+                  - codedeploy:GetDeploymentConfig
+                  - codedeploy:GetApplication
+                  - codedeploy:GetApplicationRevision
+                  - codedeploy:RegisterApplicationRevision
+                Resource: '*'
+              - Sid: EcsTaskDefRegistration
+                Effect: Allow
+                Action:
+                  - ecs:RegisterTaskDefinition
+                  - ecs:DescribeTaskDefinition
+                  - ecs:DescribeServices
+                Resource: '*'
+              - Sid: PassEcsRoles
+                Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !GetAtt TaskExecutionRole.Arn
+                  - !GetAtt TaskRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ecs-tasks.amazonaws.com
+
+  # CodeDeploy service role used by 05-cicd-pipeline
+  CodeDeployServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-codedeploy-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codedeploy.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodeDeployRoleForECS
+
+  # EventBridge role that starts the pipeline; the pipeline name is fixed by convention, so this ARN is safe to build before that stack exists
+  EventBridgeInvokePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-eventbridge-pipeline-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: start-pipeline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: codepipeline:StartPipelineExecution
+                Resource: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${EnvironmentName}-pipeline
+
+  # GitHub OIDC role for the app repo's build-and-push.yml workflow; usable before 02-ecr or 05-cicd-pipeline exist since ARNs are built by name convention
+  GitHubActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-github-actions-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - ShouldCreateProvider
+                - !Ref GitHubOidcProvider
+                - !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  # Covers both the classic sub claim and GitHub's newer org/repo-ID format
+                  - !Sub repo:${GitHubOrg}/${GitHubAppRepo}:ref:refs/heads/${GitHubBranch}
+                  - !Sub repo:${GitHubOrg}@*/${GitHubAppRepo}@*:ref:refs/heads/${GitHubBranch}
+      Policies:
+        - PolicyName: push-to-ecr-and-artifact-bucket
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: EcrAuth
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Sid: EcrPush
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                  - ecr:BatchGetImage
+                Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${RepositoryName}
+              - Sid: UploadAppSpecArtifact
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub arn:aws:s3:::${EnvironmentName}-artifacts-${AWS::AccountId}-${AWS::Region}/source/*
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-github-actions-role
+
+  # GitHub OIDC role for the infra repo's on-demand cascade workflow
+  InfraDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-infra-deploy-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - ShouldCreateProvider
+                - !Ref GitHubOidcProvider
+                - !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                # Same two sub-claim formats as GitHubActionsRole above
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOrg}/${GitHubInfraRepo}:ref:refs/heads/${GitHubBranch}
+                  - !Sub repo:${GitHubOrg}@*/${GitHubInfraRepo}@*:ref:refs/heads/${GitHubBranch}
+          # Lets CloudFormation Git sync use this same role as each stack's
+          # execution role - same permission set the GitHub Actions cascade
+          # workflow already uses, just a different caller. SourceAccount
+          # condition is the standard confused-deputy guard for service
+          # principals.
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: cascade-resync-permissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # CloudFormation: scoped to this lab's stacks only
+              - Sid: CloudFormationChangeSets
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${EnvironmentName}-*/*
+
+              # EC2 for 01-network and 03-security-endpoints; most EC2 actions don't support resource-level ARNs, so this is scoped by action list instead
+              - Sid: Ec2AvailabilityZoneLookup
+                Effect: Allow
+                Action: ec2:DescribeAvailabilityZones
+                Resource: '*'
+              - Sid: Ec2NetworkAndSecurity
+                Effect: Allow
+                Action:
+                  - ec2:CreateVpc
+                  - ec2:DeleteVpc
+                  - ec2:DescribeVpcs
+                  - ec2:ModifyVpcAttribute
+                  - ec2:CreateSubnet
+                  - ec2:DeleteSubnet
+                  - ec2:DescribeSubnets
+                  - ec2:ModifySubnetAttribute
+                  - ec2:CreateInternetGateway
+                  - ec2:DeleteInternetGateway
+                  - ec2:AttachInternetGateway
+                  - ec2:DetachInternetGateway
+                  - ec2:DescribeInternetGateways
+                  - ec2:CreateRouteTable
+                  - ec2:DeleteRouteTable
+                  - ec2:CreateRoute
+                  - ec2:DeleteRoute
+                  - ec2:AssociateRouteTable
+                  - ec2:DisassociateRouteTable
+                  - ec2:ReplaceRouteTableAssociation
+                  - ec2:DescribeRouteTables
+                  - ec2:AllocateAddress
+                  - ec2:ReleaseAddress
+                  - ec2:DescribeAddresses
+                  - ec2:CreateNatGateway
+                  - ec2:DeleteNatGateway
+                  - ec2:DescribeNatGateways
+                  - ec2:CreateSecurityGroup
+                  - ec2:DeleteSecurityGroup
+                  - ec2:DescribeSecurityGroups
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:AuthorizeSecurityGroupEgress
+                  - ec2:RevokeSecurityGroupIngress
+                  - ec2:RevokeSecurityGroupEgress
+                  - ec2:CreateVpcEndpoint
+                  - ec2:DeleteVpcEndpoints
+                  - ec2:ModifyVpcEndpoint
+                  - ec2:DescribeVpcEndpoints
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                  - ec2:DescribeTags
+                Resource: '*'
+
+              # ECR for 02-ecr.yaml
+              - Sid: EcrRepository
+                Effect: Allow
+                Action:
+                  - ecr:CreateRepository
+                  - ecr:DeleteRepository
+                  - ecr:DescribeRepositories
+                  - ecr:PutLifecyclePolicy
+                  - ecr:PutImageScanningConfiguration
+                  - ecr:TagResource
+                  - ecr:ListTagsForResource
+                Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EnvironmentName}-*
+
+              # ECS/ALB/autoscaling for 04-ecs-alb.yaml; same '*' caveat as EC2 above
+              - Sid: EcsAlbAutoScaling
+                Effect: Allow
+                Action:
+                  - ecs:CreateCluster
+                  - ecs:DeleteCluster
+                  - ecs:DescribeClusters
+                  - ecs:CreateService
+                  - ecs:UpdateService
+                  - ecs:DeleteService
+                  - ecs:DescribeServices
+                  - ecs:RegisterTaskDefinition
+                  - ecs:DeregisterTaskDefinition
+                  - ecs:DescribeTaskDefinition
+                  - ecs:TagResource
+                  - elasticloadbalancing:CreateLoadBalancer
+                  - elasticloadbalancing:DeleteLoadBalancer
+                  - elasticloadbalancing:DescribeLoadBalancers
+                  - elasticloadbalancing:CreateTargetGroup
+                  - elasticloadbalancing:DeleteTargetGroup
+                  - elasticloadbalancing:DescribeTargetGroups
+                  - elasticloadbalancing:ModifyTargetGroup
+                  - elasticloadbalancing:CreateListener
+                  - elasticloadbalancing:DeleteListener
+                  - elasticloadbalancing:DescribeListeners
+                  - elasticloadbalancing:ModifyListener
+                  - elasticloadbalancing:AddTags
+                  - elasticloadbalancing:DescribeTags
+                  - application-autoscaling:RegisterScalableTarget
+                  - application-autoscaling:DeregisterScalableTarget
+                  - application-autoscaling:DescribeScalableTargets
+                  - application-autoscaling:PutScalingPolicy
+                  - application-autoscaling:DeleteScalingPolicy
+                  - application-autoscaling:DescribeScalingPolicies
+                Resource: '*'
+              # First ScalableTarget in the account auto-creates this service-linked role, so grant permission to create it
+              - Sid: EcsAutoScalingServiceLinkedRole
+                Effect: Allow
+                Action: iam:CreateServiceLinkedRole
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService
+                Condition:
+                  StringEquals:
+                    iam:AWSServiceName: ecs.application-autoscaling.amazonaws.com
+
+              # CodePipeline/CodeDeploy/EventBridge for 05-cicd-pipeline.yaml
+              - Sid: CodePipelineCodeDeployEventBridge
+                Effect: Allow
+                Action:
+                  - codepipeline:CreatePipeline
+                  - codepipeline:DeletePipeline
+                  - codepipeline:GetPipeline
+                  - codepipeline:UpdatePipeline
+                  - codepipeline:TagResource
+                  - codedeploy:CreateApplication
+                  - codedeploy:DeleteApplication
+                  - codedeploy:GetApplication
+                  - codedeploy:CreateDeploymentGroup
+                  - codedeploy:DeleteDeploymentGroup
+                  - codedeploy:GetDeploymentGroup
+                  - codedeploy:UpdateDeploymentGroup
+                  - events:PutRule
+                  - events:DeleteRule
+                  - events:DescribeRule
+                  - events:PutTargets
+                  - events:RemoveTargets
+                Resource: '*'
+              # Artifact bucket; PublicAccessBlockConfiguration and Tags are separate actions from CreateBucket, easy to miss
+              - Sid: ArtifactBucket
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:DeleteBucket
+                  - s3:PutBucketVersioning
+                  - s3:PutEncryptionConfiguration
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:PutBucketTagging
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource: !Sub arn:aws:s3:::${EnvironmentName}-artifacts-*
+
+              # IAM roles created by this stack
+              - Sid: IamRolesForStacks
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:TagRole
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/${EnvironmentName}-*
+
+              # iam:PassRole, scoped per role and per consuming service; no blanket '*'
+              - Sid: PassEcsTaskRoles
+                Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !GetAtt TaskExecutionRole.Arn
+                  - !GetAtt TaskRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ecs-tasks.amazonaws.com
+              - Sid: PassCodePipelineRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt CodePipelineServiceRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: codepipeline.amazonaws.com
+              - Sid: PassCodeDeployRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt CodeDeployServiceRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: codedeploy.amazonaws.com
+              - Sid: PassEventBridgeRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt EventBridgeInvokePipelineRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: events.amazonaws.com
+
+              # Lets deploy-cascade.sh check the live task def before touching 04-ecs-alb, so it never reverts a CodeDeploy promotion
+              - Sid: LiveTaskDefinitionLookup
+                Effect: Allow
+                Action:
+                  - ecs:DescribeServices
+                  - ecs:DescribeTaskDefinition
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-infra-deploy-role
+
+Outputs:
+  TaskExecutionRoleArn:
+    Value: !GetAtt TaskExecutionRole.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-TaskExecutionRoleArn
+  TaskRoleArn:
+    Value: !GetAtt TaskRole.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-TaskRoleArn
+  CodePipelineServiceRoleArn:
+    Value: !GetAtt CodePipelineServiceRole.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-CodePipelineServiceRoleArn
+  CodeDeployServiceRoleArn:
+    Value: !GetAtt CodeDeployServiceRole.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-CodeDeployServiceRoleArn
+  EventBridgeInvokePipelineRoleArn:
+    Value: !GetAtt EventBridgeInvokePipelineRole.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-EventBridgeInvokePipelineRoleArn
+  GitHubActionsRoleArn:
+    Value: !GetAtt GitHubActionsRole.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-GitHubActionsRoleArn
+  InfraDeployRoleArn:
+    Value: !GetAtt InfraDeployRole.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-InfraDeployRoleArn

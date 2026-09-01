@@ -3,7 +3,8 @@ Description: >
   ECS CI/CD Lab - CodePipeline + CodeDeploy blue/green deployment, triggered
   by an EventBridge rule that fires on every new image push to ECR.
   Deploy AFTER the 04-ecs-alb stack (it needs the cluster/service/target
-  groups/listeners that stack creates).
+  groups/listeners that stack creates). Service roles (CodePipeline,
+  CodeDeploy, EventBridge) live in 00-iam-roles.yaml, imported below.
 
 Parameters:
   EnvironmentName:
@@ -11,10 +12,8 @@ Parameters:
     Default: ecs-cicd-lab
 
 Resources:
-  # ---------------- Artifact / source bucket ----------------
-  # GitHub Actions uploads appspec.yaml + taskdef.json (zipped) here after
-  # every successful image build. CodePipeline also uses this bucket as its
-  # own artifact store.
+  # Artifact / source bucket
+  # GitHub Actions uploads the zipped appspec + taskdef here after each build; CodePipeline also uses it as its artifact store
   ArtifactBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -34,78 +33,7 @@ Resources:
         - Key: Name
           Value: !Sub ${EnvironmentName}-artifacts
 
-  # ---------------- IAM: CodePipeline ----------------
-  CodePipelineServiceRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub ${EnvironmentName}-codepipeline-role
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: codepipeline.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: pipeline-permissions
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Sid: ArtifactBucketAccess
-                Effect: Allow
-                Action:
-                  - s3:GetObject
-                  - s3:GetObjectVersion
-                  - s3:PutObject
-                  - s3:GetBucketVersioning
-                Resource:
-                  - !GetAtt ArtifactBucket.Arn
-                  - !Sub ${ArtifactBucket.Arn}/*
-              - Sid: CodeDeployAccess
-                Effect: Allow
-                Action:
-                  - codedeploy:CreateDeployment
-                  - codedeploy:GetDeployment
-                  - codedeploy:GetDeploymentConfig
-                  - codedeploy:GetApplication
-                  - codedeploy:GetApplicationRevision
-                  - codedeploy:RegisterApplicationRevision
-                Resource: '*'
-              - Sid: EcsTaskDefRegistration
-                Effect: Allow
-                Action:
-                  - ecs:RegisterTaskDefinition
-                  - ecs:DescribeTaskDefinition
-                  - ecs:DescribeServices
-                Resource: '*'
-              - Sid: PassEcsRoles
-                Effect: Allow
-                Action: iam:PassRole
-                Resource:
-                  - !ImportValue
-                    Fn::Sub: ${EnvironmentName}-TaskExecutionRoleArn
-                  - !ImportValue
-                    Fn::Sub: ${EnvironmentName}-TaskRoleArn
-                Condition:
-                  StringEquals:
-                    iam:PassedToService: ecs-tasks.amazonaws.com
-
-  # ---------------- IAM: CodeDeploy ----------------
-  CodeDeployServiceRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub ${EnvironmentName}-codedeploy-role
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: codedeploy.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AWSCodeDeployRoleForECS
-
-  # ---------------- CodeDeploy application ----------------
+  # CodeDeploy application
   CodeDeployApplication:
     Type: AWS::CodeDeploy::Application
     Properties:
@@ -117,7 +45,8 @@ Resources:
     Properties:
       ApplicationName: !Ref CodeDeployApplication
       DeploymentGroupName: !Sub ${EnvironmentName}-dg
-      ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
+      ServiceRoleArn: !ImportValue
+        Fn::Sub: ${EnvironmentName}-CodeDeployServiceRoleArn
       DeploymentConfigName: CodeDeployDefault.ECSAllAtOnce
       DeploymentStyle:
         DeploymentType: BLUE_GREEN
@@ -150,23 +79,20 @@ Resources:
                 - !ImportValue
                   Fn::Sub: ${EnvironmentName}-TestListenerArn
 
-  # ---------------- CodePipeline ----------------
+  # CodePipeline
   Pipeline:
     Type: AWS::CodePipeline::Pipeline
     Properties:
       Name: !Sub ${EnvironmentName}-pipeline
-      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      RoleArn: !ImportValue
+        Fn::Sub: ${EnvironmentName}-CodePipelineServiceRoleArn
       ArtifactStore:
         Type: S3
         Location: !Ref ArtifactBucket
       Stages:
         - Name: Source
           Actions:
-            # GitHub Actions resolves the exact image URI it just pushed to
-            # ECR straight into taskdef.json and zips it with appspec.yaml
-            # before uploading here - so this pipeline never needs to talk
-            # to ECR itself, and the immutable per-build tag never has to
-            # double as a mutable "latest" pointer.
+            # GitHub Actions bakes the pushed image URI into taskdef.json before uploading, so this pipeline never talks to ECR directly
             - Name: AppSpecSource
               ActionTypeId:
                 Category: Source
@@ -199,27 +125,7 @@ Resources:
                 AppSpecTemplatePath: appspec.yaml
               RunOrder: 1
 
-  # ---------------- EventBridge: new ECR image -> start pipeline ----------------
-  EventBridgeInvokePipelineRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub ${EnvironmentName}-eventbridge-pipeline-role
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: events.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: start-pipeline
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: codepipeline:StartPipelineExecution
-                Resource: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${Pipeline}
-
+  # EventBridge: new ECR image push starts the pipeline
   EcrPushRule:
     Type: AWS::Events::Rule
     Properties:
@@ -241,7 +147,8 @@ Resources:
       Targets:
         - Arn: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${Pipeline}
           Id: PipelineTarget
-          RoleArn: !GetAtt EventBridgeInvokePipelineRole.Arn
+          RoleArn: !ImportValue
+            Fn::Sub: ${EnvironmentName}-EventBridgeInvokePipelineRoleArn
 
 Outputs:
   ArtifactBucketName:

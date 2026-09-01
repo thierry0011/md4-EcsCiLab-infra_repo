@@ -23,8 +23,8 @@ jobs:
   cascade-resync:
     runs-on: ubuntu-latest
     env:
-      AWS_REGION: ${{ vars.AWS_REGION }}
-      ENV_NAME: ${{ vars.ENV_NAME || 'ecs-cicd-lab' }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      ENV_NAME: ${{ secrets.ENV_NAME || 'ecs-cicd-lab' }}
 
     steps:
       - name: Checkout
@@ -32,13 +32,13 @@ jobs:
 
       # No IAM access keys anywhere: this exchanges the GitHub-issued OIDC
       # token for short-lived AWS credentials scoped to the infra-deploy role
-      # (07-infra-deploy-role.yaml) - a separate, much broader-permission role
-      # from the app repo's, since this one manages seven stacks' worth of
-      # resource types rather than just ECR pushes.
+      # (00-iam-roles.yaml's InfraDeployRole) - a separate, much broader-
+      # permission role from the app repo's, since this one manages six
+      # stacks' worth of resource types rather than just ECR pushes.
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_INFRA_DEPLOY_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_INFRA_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Run cascade resync

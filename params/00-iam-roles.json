@@ -1,7 +1,9 @@
 [
   { "ParameterKey": "EnvironmentName", "ParameterValue": "ecs-cicd-lab" },
+  { "ParameterKey": "RepositoryName", "ParameterValue": "ecs-cicd-lab-app" },
   { "ParameterKey": "GitHubOrg", "ParameterValue": "thierry0011" },
   { "ParameterKey": "GitHubAppRepo", "ParameterValue": "md4-EcsCiLab-app_repo" },
+  { "ParameterKey": "GitHubInfraRepo", "ParameterValue": "md4-EcsCiLab-infra_repo" },
   { "ParameterKey": "GitHubBranch", "ParameterValue": "main" },
-  { "ParameterKey": "CreateOidcProvider", "ParameterValue": "true" }
+  { "ParameterKey": "CreateOidcProvider", "ParameterValue": "false" }
 ]
