@@ -1,0 +1,4 @@
+template-file-path: templates/05-cicd-pipeline.yaml
+parameters:
+  EnvironmentName: ecs-cicd-lab
+tags: {}

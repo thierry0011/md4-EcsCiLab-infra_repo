@@ -1,0 +1,14 @@
+template-file-path: templates/04-ecs-alb.yaml
+parameters:
+  MinTaskCount: '1'
+  LabName: ECS CI/CD Lab
+  DesiredTaskCount: '1'
+  TaskCpu: '256'
+  EnvironmentName: ecs-cicd-lab
+  TaskMemory: '512'
+  MaxTaskCount: '4'
+  FullName: Thierry Kwizera
+  ContainerPort: '5000'
+  ImageUri: 711387109786.dkr.ecr.us-east-1.amazonaws.com/ecs-cicd-lab-app:bootstrap
+  CpuTargetUtilization: '50'
+tags: {}
