@@ -1,0 +1,5 @@
+template-file-path: templates/03-security-endpoints.yaml
+parameters:
+  EnvironmentName: ecs-cicd-lab
+  ContainerPort: '5000'
+tags: {}
