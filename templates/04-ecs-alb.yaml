@@ -247,3 +247,4 @@ Outputs:
     Value: !GetAtt GreenTargetGroup.TargetGroupName
     Export:
       Name: !Sub ${EnvironmentName}-GreenTargetGroupName
+#just testing the stack
