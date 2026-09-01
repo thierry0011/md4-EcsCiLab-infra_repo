@@ -1,0 +1,10 @@
+template-file-path: templates/00-iam-roles.yaml
+parameters:
+  EnvironmentName: ecs-cicd-lab
+  GitHubOrg: thierry0011
+  RepositoryName: ecs-cicd-lab-app
+  GitHubAppRepo: md4-EcsCiLab-app_repo
+  GitHubBranch: main
+  GitHubInfraRepo: md4-EcsCiLab-infra_repo
+  CreateOidcProvider: 'false'
+tags: {}
