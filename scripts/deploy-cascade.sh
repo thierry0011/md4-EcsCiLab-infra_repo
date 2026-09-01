@@ -170,10 +170,16 @@ deploy_stack() {
     fi
   fi
 
+  # AWS::ECS::TaskDefinition is excluded here: registering a new revision
+  # always reports as a "replacement" (new physical resource ARN each time),
+  # even for a plain image-tag change - but nothing is actually destroyed,
+  # and this is exactly the case resolve_live_image() exists to make routine
+  # and safe. Every other resource type still gets the strict stop-and-review
+  # treatment below.
   local replacements
   replacements=$(aws cloudformation describe-change-set \
     --stack-name "${stack_name}" --change-set-name "${change_set_name}" \
-    --query "Changes[?ResourceChange.Replacement=='True'].ResourceChange.LogicalResourceId" \
+    --query "Changes[?ResourceChange.Replacement=='True' && ResourceChange.ResourceType!='AWS::ECS::TaskDefinition'].ResourceChange.LogicalResourceId" \
     --output text)
 
   if [[ -n "${replacements}" ]]; then
