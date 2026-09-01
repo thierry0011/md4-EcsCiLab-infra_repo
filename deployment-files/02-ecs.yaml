@@ -1,0 +1,5 @@
+template-file-path: templates/02-ecr.yaml
+parameters:
+  EnvironmentName: ecs-cicd-lab
+  RepositoryName: ecs-cicd-lab-app
+tags: {}
